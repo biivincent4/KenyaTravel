@@ -7,8 +7,9 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { createUser } from "../src/lib/auth";
 import { db } from "../src/lib/db";
-import { dateForDay } from "../src/lib/validation";
+import { dateForDay, type Preferences } from "../src/lib/validation";
 import { resolveGoogleAccount } from "../src/lib/google";
+import { createPlanDraft } from "../src/lib/travel";
 
 async function main() {
   const port = 3017;
@@ -246,7 +247,7 @@ async function main() {
     );
     assert.equal((await admin("session")).user.role, "admin");
     const startDate = dateForDay(new Date().toISOString().slice(0, 10), 90);
-    const preferences = {
+    const preferences: Preferences = {
       startDate,
       endDate: dateForDay(startDate, 5),
       partySize: 2,
@@ -329,6 +330,80 @@ async function main() {
       { mode: "plan", message: "Please make my Kenya plan", preferences },
       503,
     );
+    const aliceId = (await alice("session")).user.id;
+    const working = createPlanDraft(aliceId, preferences, {
+      title: plan.itinerary.title,
+      summary: plan.itinerary.summary,
+      days: plan.itinerary.days.map(
+        ({
+          day,
+          destinationId,
+          activityIds,
+          travelOnly,
+        }: {
+          day: number;
+          destinationId: string;
+          activityIds: string[];
+          travelOnly: boolean;
+        }) => ({ day, destinationId, activityIds, travelOnly }),
+      ),
+    });
+    const savedCount = (await alice("trips")).plans.length;
+    assert.equal(savedCount, 1);
+    await alice("bookings", { planId: working.id }, 404);
+    await visitor("plans/drafts/save", { draftId: working.id }, 401);
+    await bob("plans/drafts/save", { draftId: working.id }, 404);
+    await bob(
+      "ai",
+      {
+        mode: "enquiry",
+        message: "save my itinerary",
+        previousDraftId: working.id,
+      },
+      404,
+    );
+    await alice(
+      "plans/drafts/save",
+      { draftId: working.id, itinerary: { title: "tampered" } },
+      400,
+    );
+    const [firstSave, repeatedSave] = await Promise.all([
+      alice("plans/drafts/save", { draftId: working.id }),
+      alice("plans/drafts/save", { draftId: working.id }),
+    ]);
+    assert.equal(firstSave.plan.id, repeatedSave.plan.id);
+    assert.deepEqual(firstSave.plan.itinerary, working.itinerary);
+    assert.deepEqual(firstSave.plan.preferences, preferences);
+    assert.equal((await alice("trips")).plans.length, savedCount + 1);
+    assert.equal(
+      (
+        await alice("ai", {
+          mode: "enquiry",
+          message: "please save my itinerary",
+          previousDraftId: working.id,
+        })
+      ).plan.id,
+      firstSave.plan.id,
+    );
+    assert.equal(
+      (await alice("bookings", { planId: firstSave.plan.id }, 201)).booking
+        .status,
+      "requested",
+    );
+    await alice("ai", { mode: "enquiry", message: "save my itinerary" }, 400);
+    db()
+      .prepare("UPDATE sessions SET expires_at=0 WHERE user_id=?")
+      .run(aliceId);
+    assert.equal((await alice("session")).user, null);
+    await alice("trips", undefined, 401);
+    await alice("plans/drafts/save", { draftId: working.id }, 401);
+    await alice("auth/login", { email: "alice@example.test", password });
+    assert.equal((await alice("session")).user.id, aliceId);
+    assert.equal((await alice("trips")).plans.length, savedCount + 1);
+    assert.equal(
+      (await alice("plans/drafts/save", { draftId: working.id })).plan.id,
+      firstSave.plan.id,
+    );
     await admin("admin/package", {
       id: "coastal-slow",
       description:
@@ -346,7 +421,7 @@ async function main() {
     );
     await alice("trips", undefined, 401);
     console.log(
-      "HTTP end-to-end passed: origin guard, customer/admin authentication, Google OAuth start/cancellation/replay/session-binding/link reauthentication/logout safeguards, Google-only password denial, role escalation rejection, ownership, saved itinerary, booking idempotency, enquiry/reply, agency quote, missing-provider safeguards and catalog management.",
+      "HTTP end-to-end passed: origin guard, customer/admin authentication, Google OAuth safeguards, explicit owner-only draft save, concurrent save idempotency, chat save without AI credentials, draft booking rejection, saved-plan booking, expired session rejection and same-account recovery, enquiry/reply, agency quote, missing-provider safeguards and catalog management.",
     );
   } finally {
     child.kill();

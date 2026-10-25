@@ -19,6 +19,7 @@ import {
   requestBooking,
   saveCatalogPlan,
   ownedPlan,
+  savePlanDraft,
 } from "../src/lib/travel";
 import {
   applyPaymentEvent,
@@ -582,7 +583,7 @@ test("AI unavailable state is explicit and catalog tool use is mandatory", async
     delete process.env.OPENAI_API_KEY;
   }
 });
-test("AI planning persists only validated structured output and keeps refinements owner-bound", async () => {
+test("AI planning creates unsaved validated drafts and keeps saving/refinements owner-bound", async () => {
   const originalFetch = globalThis.fetch;
   process.env.OPENAI_API_KEY = "test-fixture-not-a-real-key";
   process.env.OPENAI_MODEL = "test-model";
@@ -622,6 +623,11 @@ test("AI planning persists only validated structured output and keeps refinement
       ],
     });
   try {
+    const savedBeforeGeneration = (
+      db().prepare("SELECT count(*) count FROM plans").get() as {
+        count: number;
+      }
+    ).count;
     const result = await askAI(
       alice,
       "plan",
@@ -629,11 +635,48 @@ test("AI planning persists only validated structured output and keeps refinement
       prefs,
       catalog.id,
     );
-    assert.ok(result.plan);
-    assert.equal(result.plan.source, "ai");
-    assert.equal(result.plan.itinerary.estimate.amount, 2600);
-    assert.notEqual(result.plan.id, catalog.id);
-    assert.equal(ownedPlan(alice, result.plan.id).itinerary.days.length, 6);
+    assert.ok(result.draft);
+    assert.equal(result.draft.source, "ai");
+    assert.equal(result.draft.itinerary.estimate.amount, 2600);
+    assert.notEqual(result.draft.id, catalog.id);
+    assert.equal(
+      (
+        db().prepare("SELECT count(*) count FROM plans").get() as {
+          count: number;
+        }
+      ).count,
+      savedBeforeGeneration,
+    );
+    assert.throws(() => ownedPlan(alice, result.draft.id), /not found/);
+    assert.throws(() => requestBooking(alice, result.draft.id), /not found/);
+    assert.throws(() => savePlanDraft(bob, result.draft.id), /not found/);
+    const saved = savePlanDraft(alice, result.draft.id);
+    assert.deepEqual(saved.itinerary, result.draft.itinerary);
+    assert.deepEqual(saved.preferences, result.draft.preferences);
+    assert.equal(savePlanDraft(alice, result.draft.id).id, saved.id);
+    const refined = await askAI(
+      alice,
+      "plan",
+      "Refine with quieter mornings",
+      prefs,
+      undefined,
+      result.draft.id,
+    );
+    assert.ok(refined.draft);
+    assert.notEqual(refined.draft.id, result.draft.id);
+    assert.deepEqual(ownedPlan(alice, saved.id), saved);
+    assert.equal(
+      (
+        db().prepare("SELECT count(*) count FROM plans").get() as {
+          count: number;
+        }
+      ).count,
+      savedBeforeGeneration + 1,
+    );
+    await assert.rejects(
+      askAI(bob, "plan", "Refine this", prefs, undefined, refined.draft.id),
+      /not found/,
+    );
     await assert.rejects(
       askAI(bob, "plan", "Refine this", prefs, catalog.id),
       /not found/,

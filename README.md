@@ -120,7 +120,21 @@ The assistant performs a server-side `lookup_catalog` tool call against this age
 
 The server validates dates, duration, sequential days, known destination/activity IDs, duplicate activities and road-transfer feasibility. Transfers over six hours require an activity-free travel day; over ten hours are rejected; five-to-six-hour days allow at most one activity. This is conservative illustrative routing, not live traffic or guaranteed logistics. Costs are **recomputed by the server**, not trusted from the model. The sample USD-to-KES rate is **130**, explicitly not live FX. Over-budget estimates are flagged, not disguised as within budget. The wire schema uses Azure/OpenAI's supported strict JSON subset; full string length, numeric bounds, array limits and business validation remain enforced server-side. Each model request is bounded to 3,500 output tokens, a 60-second timeout, no redirects and no automatic retries/provider fallbacks.
 
-Without AI credentials, the UI visibly says it is not connected. Curated planning, saved trips, manual enquiries and agency quotes remain usable. AI-generated plans are persisted privately and can be refined into a new saved version. AI enquiries are transient conversation state; send an agency enquiry to preserve an actionable conversation.
+Without AI credentials, the UI visibly says it is not connected. Curated planning, saved trips, manual enquiries and agency quotes remain usable. AI enquiries are transient conversation state; send an agency enquiry to preserve an actionable conversation.
+
+### Explicitly save an AI itinerary
+
+**Create my itinerary** and **Create a refined plan** now return a validated **unsaved working draft**, not an automatically saved trip. Review its schedule, dates, party size and illustrative estimate, then choose **Save itinerary** in the chat or itinerary card. You can also send **“save my itinerary”**, **“please save this plan”** or **“save it”** through chat. These narrow explicit save requests are handled by the authenticated backend, without another model call; ordinary enquiries, negations and requests to save money are not treated as saving. An enquiry answer alone cannot be saved as an itinerary.
+
+Saving copies the server-owned draft's exact itinerary, estimate snapshot and preferences into **My trips**. Unsent changes to the preference form only take effect when you generate/refine again. Saving is owner-scoped and transactional: double-clicks/retries return the same saved plan. Only a saved plan can request an agency quote; saving never books or pays. Refining a saved plan creates a new unsaved draft and leaves the old plan/bookings unchanged. Previously saved AI plans and explicit curated saves are unaffected.
+
+Private working drafts are held server-side for **24 hours** to support validated refinement and idempotent saving; expired unsaved records are pruned when another draft is generated. They do not appear in My trips or the agency workspace, and the browser does not persist the chat/draft in local storage. Save before leaving/reloading the page: this MVP does not restore unsaved conversations after a reload. Saved plans are durable. Save-idempotency records remain associated with saved plans.
+
+### Session recovery without losing the planner
+
+Navigation now revalidates the server session after actions, on focus/visibility return and every minute while visible. A protected request's HTTP 401 triggers a fresh session check instead of leaving stale logged-in navigation alongside a generic sign-in error. The sign-in hint is conditional. Expiry does **not** discard the in-tab planner/conversation: signing back into the same account resumes it; a different account clears the previous account's private planner state. Explicit logout clears it too. Obsolete authentication notices clear after a verified successful login.
+
+When Google is used specifically to reauthenticate an expired session, its consent flow opens in a separate tab so the original planner stays in memory. Finish sign-in and return to the original tab; blocked tabs produce an actionable error rather than silently discarding the planner. Normal first-time Google sign-in remains the existing redirect flow. No server authorization check is bypassed. A normal restart with the same SQLite database preserves unexpired sessions; do not swap databases on an active user preview, because a cookie issued against a different database cannot authenticate against the original one.
 
 ## Stripe test checkout
 

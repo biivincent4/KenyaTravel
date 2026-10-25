@@ -23,6 +23,11 @@ export function db() {
     CREATE TABLE IF NOT EXISTS google_auth_attempts (state_hash TEXT PRIMARY KEY, verifier TEXT NOT NULL, nonce TEXT NOT NULL, link_user_id TEXT REFERENCES users(id), session_hash TEXT, return_section TEXT NOT NULL, expires_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS packages (id TEXT PRIMARY KEY, content TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS plans (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, preferences TEXT NOT NULL, itinerary TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS plan_drafts (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+      preferences TEXT NOT NULL, itinerary TEXT NOT NULL, expires_at INTEGER NOT NULL,
+      saved_plan_id TEXT UNIQUE REFERENCES plans(id)
+    );
     CREATE TABLE IF NOT EXISTS bookings (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), plan_id TEXT NOT NULL REFERENCES plans(id),
       status TEXT NOT NULL CHECK(status IN ('requested','quoted','payment_pending','paid')),
@@ -59,6 +64,10 @@ export type Plan = Omit<PlanRow, "preferences" | "itinerary"> & {
   preferences: Preferences;
   itinerary: Itinerary;
 };
+export type PlanDraft = Pick<
+  Plan,
+  "id" | "user_id" | "preferences" | "itinerary"
+> & { source: "ai"; expires_at: number };
 export type Booking = {
   id: string;
   user_id: string;

@@ -231,9 +231,13 @@ test("Azure enquiry and plans keep catalog grounding, strict structured output a
     "Create a six-day wildlife trip from the catalog",
     preferences,
   );
-  assert.ok(result.plan);
-  assert.equal(result.plan.itinerary.estimate.amount, 2600);
-  assert.equal(result.plan.source, "ai");
+  assert.ok(result.draft);
+  assert.equal(result.draft.itinerary.estimate.amount, 2600);
+  assert.equal(result.draft.source, "ai");
+  assert.equal(
+    db().prepare("SELECT id FROM plans WHERE id=?").get(result.draft.id),
+    undefined,
+  );
   assert.equal(requests.length, 4);
   draft.days[0].activityIds = [];
   draft.days[0].travelOnly = false;

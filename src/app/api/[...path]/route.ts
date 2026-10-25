@@ -37,7 +37,13 @@ import {
   verifyWebhook,
   applyPaymentEvent,
 } from "@/lib/payments";
-import { issueQuote, requestBooking, saveCatalogPlan } from "@/lib/travel";
+import {
+  issueQuote,
+  requestBooking,
+  saveCatalogPlan,
+  savePlanDraft,
+} from "@/lib/travel";
+import { isSaveItineraryRequest } from "@/lib/chat-intent";
 import { destinations } from "@/lib/catalog";
 import {
   applicationOrigin,
@@ -314,6 +320,13 @@ async function handle(
         201,
       );
     }
+    if (path === "plans/drafts/save" && method === "POST") {
+      const { draftId } = z
+        .object({ draftId: z.string().uuid() })
+        .strict()
+        .parse(await body(request));
+      return json({ plan: savePlanDraft(user.id, draftId) });
+    }
     if (path === "bookings" && method === "POST") {
       const { planId } = z
         .object({ planId: z.string().uuid() })
@@ -342,13 +355,15 @@ async function handle(
           message: z.string().trim().min(3).max(2000),
           preferences: preferenceSchema.optional(),
           previousPlanId: z.string().uuid().optional(),
+          previousDraftId: z.string().uuid().optional(),
         })
         .parse(await body(request));
-      if (input.mode === "plan" && !input.preferences)
+      const saving = isSaveItineraryRequest(input.message);
+      if (input.mode === "plan" && !input.preferences && !saving)
         throw new AppError(
           "Travel dates, party size, budget and interests are required.",
         );
-      if (!rateLimit(`ai:${user.id}`, 12, 3600))
+      if (!saving && !rateLimit(`ai:${user.id}`, 12, 3600))
         throw new AppError(
           "Your AI request limit is reached. Try again in an hour or contact the agency.",
           429,
@@ -360,6 +375,7 @@ async function handle(
           input.message,
           input.preferences,
           input.previousPlanId,
+          input.previousDraftId,
         ),
       );
     }

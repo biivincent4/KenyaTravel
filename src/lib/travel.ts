@@ -6,6 +6,7 @@ import {
   transaction,
   type PlanRow,
   type Booking,
+  type PlanDraft,
 } from "./db";
 import { destinationById, transferHours } from "./catalog";
 import {
@@ -87,6 +88,109 @@ export function ownedPlan(userId: string, id: string) {
     .get(id, userId) as PlanRow | undefined;
   if (!row) throw new AppError("Trip not found.", 404);
   return parsePlan(row);
+}
+type DraftRow = {
+  id: string;
+  user_id: string;
+  preferences: string;
+  itinerary: string;
+  expires_at: number;
+  saved_plan_id: string | null;
+};
+function draftRow(userId: string, id: string) {
+  const row = db()
+    .prepare("SELECT * FROM plan_drafts WHERE id=? AND user_id=?")
+    .get(id, userId) as DraftRow | undefined;
+  if (!row)
+    throw new AppError(
+      "Working itinerary not found. Create a new draft before saving.",
+      404,
+    );
+  return row;
+}
+function parseDraft(row: DraftRow): PlanDraft {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    source: "ai",
+    preferences: JSON.parse(row.preferences),
+    itinerary: JSON.parse(row.itinerary),
+    expires_at: row.expires_at,
+  };
+}
+function requireCurrentDraft(row: DraftRow) {
+  if (row.expires_at <= Date.now())
+    throw new AppError(
+      "This working itinerary has expired. Create a new draft before saving.",
+      410,
+    );
+}
+export function ownedDraft(userId: string, id: string) {
+  const row = draftRow(userId, id);
+  requireCurrentDraft(row);
+  return parseDraft(row);
+}
+export function createPlanDraft(
+  userId: string,
+  preferences: Preferences,
+  input: unknown,
+) {
+  const itinerary = validateItinerary(input, preferences);
+  const id = randomUUID();
+  const now = Date.now();
+  db()
+    .prepare(
+      "DELETE FROM plan_drafts WHERE saved_plan_id IS NULL AND expires_at<=?",
+    )
+    .run(now);
+  db()
+    .prepare(
+      "INSERT INTO plan_drafts(id,user_id,preferences,itinerary,expires_at) VALUES (?,?,?,?,?)",
+    )
+    .run(
+      id,
+      userId,
+      JSON.stringify(preferences),
+      JSON.stringify(itinerary),
+      now + 86400000,
+    );
+  return ownedDraft(userId, id);
+}
+export function savePlanDraft(userId: string, id: string) {
+  return transaction(() => {
+    const row = draftRow(userId, id);
+    if (row.saved_plan_id) return ownedPlan(userId, row.saved_plan_id);
+    requireCurrentDraft(row);
+    const draft = parseDraft(row);
+    // Recheck feasibility, but retain the server-owned estimate snapshot shown to the customer.
+    validateItinerary(
+      {
+        title: draft.itinerary.title,
+        summary: draft.itinerary.summary,
+        days: draft.itinerary.days.map(
+          ({ day, destinationId, activityIds, travelOnly }) => ({
+            day,
+            destinationId,
+            activityIds,
+            travelOnly,
+          }),
+        ),
+      },
+      draft.preferences,
+    );
+    const planId = randomUUID();
+    db()
+      .prepare(
+        "INSERT INTO plans(id,user_id,source,preferences,itinerary) VALUES (?,?,'ai',?,?)",
+      )
+      .run(planId, userId, row.preferences, row.itinerary);
+    db()
+      .prepare(
+        "UPDATE plan_drafts SET saved_plan_id=? WHERE id=? AND user_id=?",
+      )
+      .run(planId, id, userId);
+    return ownedPlan(userId, planId);
+  });
 }
 export function requestBooking(userId: string, planId: string) {
   const plan = ownedPlan(userId, planId);

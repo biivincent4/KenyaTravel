@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -43,8 +44,10 @@ import {
   money,
   type Preferences,
 } from "@/lib/validation";
-import type { Booking, Enquiry, Plan, User } from "@/lib/db";
+import type { Booking, Enquiry, Plan, PlanDraft, User } from "@/lib/db";
 import { googleErrors } from "@/lib/google-messages";
+import { api as requestApi, ApiError } from "@/lib/client-api";
+import { isSaveItineraryRequest } from "@/lib/chat-intent";
 
 type View =
   | "home"
@@ -64,7 +67,11 @@ type Session = {
 };
 type TripData = { plans: Plan[]; bookings: Booking[]; enquiries: Enquiry[] };
 type AdminData = TripData & { packages: TravelPackage[] };
-type Chat = { role: "assistant" | "user"; text: string };
+type Chat = { role: "assistant" | "user"; text: string; draftId?: string };
+const welcomeChat: Chat = {
+  role: "assistant",
+  text: "Karibu! Tell me what your ideal Kenya trip feels like. When AI is connected, I can look up our curated catalog and help shape a day-by-day draft. Choose Save itinerary when you're ready to keep it in My trips. Our team confirms every quote before checkout.",
+};
 const emptyTrips: TripData = { plans: [], bookings: [], enquiries: [] };
 const navItems: { id: View; label: string }[] = [
   { id: "destinations", label: "Destinations" },
@@ -80,17 +87,6 @@ const initialPreferences = (): Preferences => ({
   currency: "USD",
   interests: ["Wildlife", "Nature"],
 });
-async function api<T>(path: string, data?: object): Promise<T> {
-  const response = await fetch(`/api/${path}`, {
-    method: data ? "POST" : "GET",
-    headers: data ? { "Content-Type": "application/json" } : undefined,
-    body: data ? JSON.stringify(data) : undefined,
-  });
-  const result = await response.json();
-  if (!response.ok)
-    throw new Error(result.error || "The request could not be completed.");
-  return result as T;
-}
 
 export default function TravelApp({
   initialPackages,
@@ -112,6 +108,7 @@ export default function TravelApp({
   const [admin, setAdmin] = useState<AdminData | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
   const [notice, setNotice] = useState("");
   const [auth, setAuth] = useState<"login" | "register" | null>(null);
   const [mobileMenu, setMobileMenu] = useState(false);
@@ -122,17 +119,84 @@ export default function TravelApp({
     initialPackages[0]?.id || "",
   );
   const [activePlan, setActivePlan] = useState<Plan | null>(null);
+  const [activeDraft, setActiveDraft] = useState<PlanDraft | null>(null);
   const [plannerMode, setPlannerMode] = useState<"curated" | "ai">("curated");
-  const [chat, setChat] = useState<Chat[]>([
-    {
-      role: "assistant",
-      text: "Karibu! Tell me what your ideal Kenya trip feels like. When AI is connected, I can look up our curated catalog and help shape a day-by-day plan. Our team confirms every quote before checkout.",
-    },
-  ]);
+  const [chat, setChat] = useState<Chat[]>([welcomeChat]);
   const [prompt, setPrompt] = useState("");
   const [filter, setFilter] = useState("All experiences");
   const closeAuth = useCallback(() => setAuth(null), []);
   const closeDestination = useCallback(() => setDestination(null), []);
+  const actionRunning = useRef(false);
+  const sessionRevision = useRef(0);
+  const authenticatedUser = useRef<string | null>(null);
+  const plannerOwner = useRef<string | null>(null);
+  const reauthPending = useRef(false);
+  const api = useCallback(async <T,>(path: string, data?: object) => {
+    const owner = authenticatedUser.current;
+    const result = await requestApi<T>(path, data);
+    if (
+      owner &&
+      owner !== plannerOwner.current &&
+      path !== "session" &&
+      !path.startsWith("auth/")
+    )
+      throw new ApiError(
+        "The signed-in account changed while this request was running. Its result was not displayed; retry from the current account.",
+        409,
+        path,
+      );
+    return result;
+  }, []);
+
+  const applySession = useCallback((next: Session) => {
+    const previousId = authenticatedUser.current;
+    const nextId = next.user?.id || null;
+    if (nextId && plannerOwner.current && plannerOwner.current !== nextId) {
+      setActivePlan(null);
+      setActiveDraft(null);
+      setChat([welcomeChat]);
+      setPrompt("");
+      setPreferences(initialPreferences());
+    }
+    if (nextId) {
+      plannerOwner.current = nextId;
+      setAuthNotice("");
+      if (reauthPending.current) setAuth(null);
+      reauthPending.current = false;
+    } else if (previousId) {
+      reauthPending.current = true;
+      setAuthNotice(
+        "Your session is no longer valid on the server. Your planner and conversation are kept in this tab; sign in to the same account to continue.",
+      );
+    }
+    if (previousId !== nextId) {
+      setTrips(emptyTrips);
+      setAdmin(null);
+    }
+    authenticatedUser.current = nextId;
+    setSession(next);
+  }, []);
+
+  const synchronizeSession = useCallback(async () => {
+    const revision = ++sessionRevision.current;
+    const next = await api<Session>("session");
+    if (revision !== sessionRevision.current) return null;
+    applySession(next);
+    if (next.user) {
+      try {
+        const data = await api<TripData>("trips");
+        if (revision === sessionRevision.current) setTrips(data);
+      } catch (e) {
+        if (revision !== sessionRevision.current) return null;
+        if (!(e instanceof ApiError) || e.status !== 401) throw e;
+        const current = await api<Session>("session");
+        if (revision !== sessionRevision.current) return null;
+        applySession(current);
+        return current;
+      }
+    }
+    return next;
+  }, [api, applySession]);
 
   useEffect(() => {
     const sync = () => {
@@ -152,10 +216,10 @@ export default function TravelApp({
     };
     sync();
     window.addEventListener("hashchange", sync);
-    api<Session>("session")
+    Promise.resolve()
+      .then(synchronizeSession)
       .then(async (s) => {
-        setSession(s);
-        if (s.user) setTrips(await api<TripData>("trips"));
+        if (!s) return;
         if (new URLSearchParams(window.location.search).has("checkout"))
           setNotice(
             "Checkout returned. Only a verified provider webhook updates your booking to paid. Refresh your trips to check its status.",
@@ -191,7 +255,28 @@ export default function TravelApp({
       .catch((e: Error) => setError(e.message))
       .finally(() => setReady(true));
     return () => window.removeEventListener("hashchange", sync);
-  }, []);
+  }, [synchronizeSession]);
+
+  useEffect(() => {
+    const check = () => {
+      if (document.visibilityState !== "visible") return;
+      void synchronizeSession().catch(() =>
+        setAuthNotice(
+          "Unable to check your session while the server is unavailable. Your working itinerary is still kept in this tab.",
+        ),
+      );
+    };
+    window.addEventListener("focus", check);
+    window.addEventListener("pageshow", check);
+    document.addEventListener("visibilitychange", check);
+    const interval = window.setInterval(check, 60000);
+    return () => {
+      window.removeEventListener("focus", check);
+      window.removeEventListener("pageshow", check);
+      document.removeEventListener("visibilitychange", check);
+      window.clearInterval(interval);
+    };
+  }, [synchronizeSession]);
 
   function go(next: View) {
     setView(next);
@@ -202,23 +287,55 @@ export default function TravelApp({
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
   async function run(task: () => Promise<void>) {
-    if (busy) return;
+    if (actionRunning.current) return;
+    actionRunning.current = true;
     setBusy(true);
     setError("");
     setNotice("");
     try {
       await task();
+      await synchronizeSession();
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Something went wrong. Please retry.",
-      );
+      if (
+        e instanceof ApiError &&
+        e.status === 401 &&
+        !["auth/login", "auth/register"].includes(e.path)
+      ) {
+        try {
+          const current = await synchronizeSession();
+          if (current && !current.user) {
+            reauthPending.current = true;
+            setAuth("login");
+            setAuthNotice(
+              "The server needs you to sign in again. Your planner and conversation are kept in this tab; use the same account to continue.",
+            );
+          } else if (current?.user) {
+            if (e.path.startsWith("auth/")) setError(e.message);
+            else
+              setNotice(
+                "Your sign-in has been verified. Refresh My trips to check the latest state before retrying.",
+              );
+          }
+        } catch {
+          setError(
+            "The request was rejected and your session could not be checked. Your working itinerary is still kept in this tab. Retry when the server is available.",
+          );
+        }
+      } else {
+        setError(
+          e instanceof Error
+            ? e.message
+            : "Something went wrong. Please retry.",
+        );
+      }
     } finally {
+      actionRunning.current = false;
       setBusy(false);
     }
   }
   function signedIn() {
     if (!session.user) {
-      setAuth("register");
+      setAuth(reauthPending.current ? "login" : "register");
       return false;
     }
     return true;
@@ -227,6 +344,19 @@ export default function TravelApp({
     setTrips(await api<TripData>("trips"));
   }
   async function startGoogle(intent: "signin" | "link", password?: string) {
+    if (actionRunning.current) return;
+    const keepPlanner = reauthPending.current && intent === "signin";
+    const authWindow = keepPlanner
+      ? window.open("about:blank", "_blank")
+      : null;
+    if (keepPlanner && !authWindow) {
+      setError(
+        "Allow the Google sign-in tab to open, or use email/password here. Your working itinerary has not been discarded.",
+      );
+      return;
+    }
+    if (authWindow) authWindow.opener = null;
+    let launched = false;
     await run(async () => {
       const result = await api<{ url: string }>("auth/google/start", {
         intent,
@@ -241,8 +371,17 @@ export default function TravelApp({
         throw new Error(
           "Unexpected Google sign-in destination. Please contact the agency.",
         );
-      window.location.assign(target.href);
+      if (authWindow) {
+        authWindow.location.replace(target.href);
+        launched = true;
+        setNotice(
+          "Complete Google sign-in in the new tab, then return here. Your working itinerary and conversation stay in this tab.",
+        );
+      } else {
+        window.location.assign(target.href);
+      }
     });
+    if (authWindow && !launched) authWindow.close();
   }
   async function openAgency() {
     go("agency");
@@ -259,6 +398,10 @@ export default function TravelApp({
   }
   async function saveCurated(event: FormEvent) {
     event.preventDefault();
+    if (plannerMode === "ai") {
+      await generate("plan");
+      return;
+    }
     if (!signedIn()) return;
     await run(async () => {
       const result = await api<{ plan: Plan }>("plans/catalog", {
@@ -266,6 +409,7 @@ export default function TravelApp({
         preferences,
       });
       setActivePlan(result.plan);
+      setActiveDraft(null);
       await refresh();
       setNotice(
         "Your curated itinerary is saved. Review the estimate, then request an agency quote.",
@@ -284,11 +428,16 @@ export default function TravelApp({
       return;
     }
     await run(async () => {
-      const result = await api<{ plan?: Plan; answer?: string }>("ai", {
+      const result = await api<{
+        plan?: Plan;
+        draft?: PlanDraft;
+        answer?: string;
+      }>("ai", {
         mode,
         message: text,
-        preferences,
-        previousPlanId: activePlan?.id,
+        preferences: isSaveItineraryRequest(text) ? undefined : preferences,
+        previousPlanId: activeDraft ? undefined : activePlan?.id,
+        previousDraftId: activeDraft?.id,
       });
       setChat((c) => [
         ...c,
@@ -297,14 +446,41 @@ export default function TravelApp({
           role: "assistant",
           text:
             result.answer ||
-            "Your itinerary is ready and saved. Its estimate is calculated from our illustrative catalog, not live supplier pricing.",
+            "Your itinerary draft is ready, but is not in My trips yet. Choose Save itinerary or ask “save my itinerary” to keep it. Its estimate uses our illustrative catalog, not live supplier prices.",
+          draftId: result.draft?.id,
         },
       ]);
       setPrompt("");
       if (result.plan) {
         setActivePlan(result.plan);
+        setActiveDraft(null);
         await refresh();
+        setNotice("Your itinerary is saved privately in My trips.");
+      } else if (result.draft) {
+        setActiveDraft(result.draft);
+        setActivePlan(null);
       }
+    });
+  }
+  async function saveDraft() {
+    if (!signedIn() || !activeDraft) return;
+    await run(async () => {
+      const result = await api<{ plan: Plan }>("plans/drafts/save", {
+        draftId: activeDraft.id,
+      });
+      setActivePlan(result.plan);
+      setActiveDraft(null);
+      setChat((c) => [
+        ...c,
+        {
+          role: "assistant",
+          text: "Your itinerary is saved privately in My trips. You can request an agency quote there. No booking or payment was made.",
+        },
+      ]);
+      await refresh();
+      setNotice(
+        "Itinerary saved to My trips. Your dates and preferences are preserved.",
+      );
     });
   }
   async function booking(planId: string) {
@@ -414,6 +590,11 @@ export default function TravelApp({
                 onClick={() =>
                   run(async () => {
                     await api("auth/logout", {});
+                    ++sessionRevision.current;
+                    authenticatedUser.current = null;
+                    plannerOwner.current = null;
+                    reauthPending.current = false;
+                    setAuthNotice("");
                     setSession((s) => ({
                       ...s,
                       user: null,
@@ -422,6 +603,9 @@ export default function TravelApp({
                     setTrips(emptyTrips);
                     setAdmin(null);
                     setActivePlan(null);
+                    setActiveDraft(null);
+                    setChat([welcomeChat]);
+                    setPrompt("");
                     go("home");
                   })
                 }
@@ -453,17 +637,18 @@ export default function TravelApp({
           </button>
         </div>
       </header>
-      {(error || notice) && (
+      {(error || authNotice || notice) && (
         <div
-          className={`global-message ${error ? "error" : "success"}`}
-          role={error ? "alert" : "status"}
+          className={`global-message ${error || authNotice ? "error" : "success"}`}
+          role={error || authNotice ? "alert" : "status"}
         >
-          <span>{error || notice}</span>
+          <span>{error || authNotice || notice}</span>
           <button
             className="icon-button"
             aria-label="Dismiss message"
             onClick={() => {
               setError("");
+              setAuthNotice("");
               setNotice("");
             }}
           >
@@ -976,14 +1161,17 @@ export default function TravelApp({
                       onClick={() => generate("plan")}
                     >
                       <Sparkles size={16} />
-                      {activePlan
+                      {activePlan || activeDraft
                         ? "Create a refined plan"
                         : "Create my itinerary"}
                     </button>
                   )}
                   <p className="field-note">
-                    <LockKeyhole size={12} /> Sign in to save. No payment at
-                    this stage.
+                    <LockKeyhole size={12} />{" "}
+                    {session.user
+                      ? "You can save privately to your account."
+                      : "Sign in to save."}{" "}
+                    No payment at this stage.
                   </p>
                 </form>
               </div>
@@ -1025,7 +1213,18 @@ export default function TravelApp({
                     {chat.map((m, i) => (
                       <div className={`chat-bubble ${m.role}`} key={i}>
                         {m.role === "assistant" && <Sparkles size={14} />}
-                        <span>{m.text}</span>
+                        <span>
+                          {m.text}
+                          {m.draftId === activeDraft?.id && m.draftId && (
+                            <button
+                              className="underlined-link"
+                              disabled={busy}
+                              onClick={saveDraft}
+                            >
+                              Save itinerary <Check size={14} />
+                            </button>
+                          )}
+                        </span>
                       </div>
                     ))}
                   </div>
@@ -1042,8 +1241,15 @@ export default function TravelApp({
                     />
                     <button
                       className="icon-button"
-                      aria-label="Ask AI a travel question"
-                      disabled={busy || !session.aiReady}
+                      aria-label={
+                        isSaveItineraryRequest(prompt)
+                          ? "Save current itinerary"
+                          : "Ask AI a travel question"
+                      }
+                      disabled={
+                        busy ||
+                        (!session.aiReady && !isSaveItineraryRequest(prompt))
+                      }
                       onClick={() => generate("enquiry")}
                     >
                       <Send size={19} />
@@ -1051,13 +1257,25 @@ export default function TravelApp({
                   </div>
                   <div className="field-note chat-note">
                     Use the question button for enquiries; &ldquo;Create my
-                    itinerary&rdquo; builds or refines a saved trip. Prompts and
-                    travel preferences are sent to {session.aiProviderLabel}{" "}
-                    when connected. Don&apos;t share private documents or
-                    payment details.
+                    itinerary&rdquo; creates an unsaved draft or refines the
+                    current itinerary into a new draft. Choose Save itinerary or
+                    ask &ldquo;save my itinerary&rdquo; to add it to My trips.
+                    Saving uses the draft&apos;s displayed preferences; form
+                    changes apply when you generate again. Prompts and travel
+                    preferences are sent to {session.aiProviderLabel} when
+                    connected. Don&apos;t share private documents or payment
+                    details.
                   </div>
                 </div>
-                {activePlan ? (
+                {activeDraft ? (
+                  <ItineraryCard
+                    plan={activeDraft}
+                    busy={busy}
+                    onSave={saveDraft}
+                    onCheckout={checkout}
+                    paymentReady={session.paymentReady}
+                  />
+                ) : activePlan ? (
                   <ItineraryCard
                     plan={activePlan}
                     booking={trips.bookings.find(
@@ -1075,7 +1293,7 @@ export default function TravelApp({
                     </span>
                     <h3>A little possibility. A lot to look forward to.</h3>
                     <p>
-                      Your saved day-by-day itinerary will appear here.
+                      Your day-by-day itinerary draft will appear here.
                       <br />
                       Every estimate is checked against your preferences.
                     </p>
@@ -1219,6 +1437,7 @@ export default function TravelApp({
                         className="underlined-link refine-link"
                         onClick={() => {
                           setActivePlan(p);
+                          setActiveDraft(null);
                           setPreferences(p.preferences);
                           setPlannerMode("ai");
                           go("planner");
@@ -1764,8 +1983,8 @@ export default function TravelApp({
                   password: data.get("password"),
                   ...(auth === "register" ? { name: data.get("name") } : {}),
                 });
-                const s = await api<Session>("session");
-                setSession(s);
+                await synchronizeSession();
+                setError("");
                 setAuth(null);
                 setAdmin(null);
                 await refresh();
@@ -1972,16 +2191,18 @@ function ItineraryCard({
   booking,
   busy,
   onBook,
+  onSave,
   onCheckout,
   paymentReady,
 }: {
-  plan: Plan;
-  booking?: Booking;
+  plan: Pick<Plan, "id" | "source" | "preferences" | "itinerary">;
   busy: boolean;
-  onBook: () => void;
   onCheckout: (id: string) => void;
   paymentReady: boolean;
-}) {
+} & (
+  | { onSave: () => void; onBook?: never; booking?: never }
+  | { onSave?: never; onBook: () => void; booking?: Booking }
+)) {
   return (
     <article className="panel itinerary-card">
       <div className="itinerary-header">
@@ -1991,14 +2212,26 @@ function ItineraryCard({
             : "CURATED CATALOG ITINERARY"}
         </div>
         <span className={`status-badge ${booking?.status || "estimated"}`}>
-          {booking?.status.replace("_", " ") || "estimated"}
+          {onSave
+            ? "unsaved draft"
+            : booking?.status.replace("_", " ") || "saved estimate"}
         </span>
       </div>
       <h2>{plan.itinerary.title}</h2>
       <p className="muted">{plan.itinerary.summary}</p>
       <PlanDetails plan={plan} />
       <QuoteDetails booking={booking} />
-      {!booking ? (
+      {onSave ? (
+        <>
+          <button className="button" disabled={busy} onClick={onSave}>
+            Save itinerary <Check size={16} />
+          </button>
+          <p className="field-note">
+            Not in My trips yet. Save before requesting a quote. This working
+            draft expires after 24 hours.
+          </p>
+        </>
+      ) : !booking ? (
         <button className="button" disabled={busy} onClick={onBook}>
           Request an agency quote <ArrowRight size={16} />
         </button>
@@ -2049,15 +2282,23 @@ function ItineraryCard({
         </div>
       )}
       <div className="field-note itinerary-footnote">
-        Saved privately.{" "}
-        {booking
-          ? `Request reference: ${booking.id.slice(0, 8)}`
-          : "The agency sees this plan when you request a quote."}
+        {onSave
+          ? "Private working draft. Save it before leaving or reloading this page."
+          : "Saved privately. "}{" "}
+        {onSave
+          ? "No booking or payment has been made."
+          : booking
+            ? `Request reference: ${booking.id.slice(0, 8)}`
+            : "The agency sees this plan when you request a quote."}
       </div>
     </article>
   );
 }
-function PlanDetails({ plan }: { plan: Plan }) {
+function PlanDetails({
+  plan,
+}: {
+  plan: Pick<Plan, "preferences" | "itinerary">;
+}) {
   return (
     <>
       <div className="trip-meta">
