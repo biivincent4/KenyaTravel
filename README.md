@@ -94,7 +94,25 @@ AZURE_OPENAI_DEPLOYMENT=kenyatravel-gpt41mini
 
 `AZURE_OPENAI_ENDPOINT` is the HTTPS **resource origin only**, not a full deployment URL. This MVP accepts Azure public resource hostnames under `openai.azure.com`, `cognitiveservices.azure.com` or `services.ai.azure.com`; custom gateways and private-IP endpoints are deliberately not accepted. The API request uses **`/openai/v1/chat/completions`**, the server-only `api-key` header, and the configured **deployment name** as `model`. The supported v1 API requires no dated `api-version` query. See Microsoft's [endpoint switching guide](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/switching-endpoints) and [structured output guide](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/structured-outputs).
 
-The planned KenyaTravel deployment configuration is a dedicated **AIServices S0** account in **East US**, **gpt-4.1-mini version 2025-04-14**, **GlobalStandard** usage-based billing, initially **10 capacity units** (10,000 TPM per the model's published capacity mapping), with the provider's default content filtering and no provisioned throughput, spillover or dynamic-quota expansion. Capacity is a throttle allocation, **not a spending cap**. Monitor model usage and set appropriate subscription budgets/alerts before wider use. GlobalStandard may process requests **outside the resource's East US region**; this is not an East-US-only data-residency guarantee. Resource creation requires an MFA-authenticated Azure CLI session and suitable subscription permissions. As of this integration change, resource creation is **blocked** by Azure's `RequestDisallowedByAzure` MFA enforcement even after a successful interactive CLI login; no dedicated resource or model deployment has been created, and genuine Azure AI calls have not yet been verified. Do not claim a deployment exists until its Azure provisioning state is `Succeeded`.
+The local KenyaTravel preview is connected to the following dedicated deployment, with the resource and model provisioning state verified as **Succeeded**:
+
+| Setting                      | Value                                              |
+| ---------------------------- | -------------------------------------------------- |
+| Resource group               | `rg-kenyatravel-ai`                                |
+| AI resource                  | `kenyatravel-ai-eb13777c`                          |
+| Resource kind / SKU / region | `AIServices` / `S0` / `eastus`                     |
+| Azure OpenAI endpoint        | `https://kenyatravel-ai-eb13777c.openai.azure.com` |
+| Deployment name              | `kenyatravel-gpt41mini`                            |
+| Model / version              | `gpt-4.1-mini` / `2025-04-14`                      |
+| Deployment SKU / capacity    | `GlobalStandard` / `10`                            |
+| Published rate limits        | 10 requests/minute; 10,000 tokens/minute           |
+| Content filter               | `Microsoft.DefaultV2`                              |
+
+Genuine catalog-grounded enquiry and six-day itinerary generation have been verified using synthetic preferences and an isolated temporary database. Generated plans still require server validation and agency confirmation; this is not live supplier availability or a guarantee that every generated response will be valid.
+
+Billing is usage based, with no provisioned throughput, spillover or dynamic-quota expansion enabled. Capacity is a throttle allocation, **not a spending cap**. Monitor model usage and set appropriate subscription budgets/alerts before wider use. GlobalStandard may process requests **outside the resource's East US region**; this is not an East-US-only data-residency guarantee. A planning/enquiry turn makes two model requests (catalog lookup followed by structured output), so this small pilot capacity can throttle concurrent users. Quota failures are surfaced rather than silently retried or routed elsewhere.
+
+Resource creation requires a session that actually satisfies Azure tenant MFA and suitable subscription permissions. A successful CLI login or enabling a personal Microsoft account's two-step setting alone is not proof that resource-write MFA is satisfied. If Azure reports `RequestDisallowedByAzure`, use [Microsoft's MFA troubleshooting guidance](https://learn.microsoft.com/en-us/cli/azure/use-azure-cli-successfully-troubleshooting#troubleshooting-multifactor-authentication-mfa); never disable tenant policy to bypass the requirement.
 
 Use `.env.local` for this local preview only and never commit resource keys or display them in logs/chat. Keep existing Google/payment settings and SQLite data unchanged when editing AI configuration. Restart the app after changing configuration. For production, use a managed identity/Entra access design or managed secret storage with key rotation; this MVP's API-key environment setup is for local activation and is not a production secret-management solution.
 

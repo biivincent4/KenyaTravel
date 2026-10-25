@@ -235,6 +235,12 @@ test("Azure enquiry and plans keep catalog grounding, strict structured output a
   assert.equal(result.plan.itinerary.estimate.amount, 2600);
   assert.equal(result.plan.source, "ai");
   assert.equal(requests.length, 4);
+  draft.days[0].activityIds = [];
+  draft.days[0].travelOnly = false;
+  await assert.rejects(
+    askAI(userId, "plan", "Create another trip", preferences),
+    /Travel days must have no activities/,
+  );
   draft.days[0].activityIds = ["invented"];
   await assert.rejects(
     askAI(userId, "plan", "Create another trip", preferences),
