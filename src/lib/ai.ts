@@ -3,39 +3,58 @@ import { packages } from "./db";
 import { destinations, transferHours } from "./catalog";
 import { AppError, draftSchema, type Preferences } from "./validation";
 import { ownedPlan, savePlan } from "./travel";
+import { aiConfiguration, aiStatus } from "./ai-config";
 
-export const aiReady = () =>
-  !!process.env.OPENAI_API_KEY && !!process.env.OPENAI_MODEL;
+export const aiReady = () => aiStatus().ready;
 async function complete(body: object) {
+  const config = aiConfiguration();
   let response: Response;
   try {
-    response = await fetch("https://api.openai.com/v1/chat/completions", {
+    response = await fetch(config.url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        ...config.headers,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model: process.env.OPENAI_MODEL, ...body }),
+      body: JSON.stringify({
+        ...body,
+        model: config.model,
+        max_completion_tokens: 3500,
+      }),
+      cache: "no-store",
+      redirect: "error",
       signal: AbortSignal.timeout(60000),
     });
   } catch (error) {
     console.error(
-      "AI connection failed",
+      `${config.label} connection failed`,
       error instanceof Error ? error.name : "unknown",
     );
     throw new AppError(
-      "The AI service could not be reached. Please retry or send an enquiry to the agency.",
+      `${config.label} could not be reached. Please retry or send an enquiry to the agency.`,
       502,
     );
   }
   if (!response.ok) {
-    console.error("AI provider error", response.status);
+    console.error(`${config.label} provider error`, response.status);
+    if (response.status === 429)
+      throw new AppError(
+        `${config.label} is at its rate or quota limit. Please wait before retrying or contact the agency. No alternate provider was used.`,
+        429,
+      );
     throw new AppError(
-      "The AI provider could not complete this request. Check model access and API configuration, or contact the agency.",
+      `${config.label} could not complete this request. Check the selected model/deployment, access and API configuration, or contact the agency. No alternate provider was used.`,
       502,
     );
   }
-  return response.json();
+  try {
+    return await response.json();
+  } catch {
+    throw new AppError(
+      `${config.label} returned an unreadable response. Please retry or contact the agency.`,
+      502,
+    );
+  }
 }
 const providerResult = z.object({
   choices: z
@@ -65,11 +84,7 @@ export async function askAI(
   preferences?: Preferences,
   previousPlanId?: string,
 ) {
-  if (!aiReady())
-    throw new AppError(
-      "AI is not connected yet. Add OPENAI_API_KEY and OPENAI_MODEL on the server. You can still explore curated trips, save a plan and request an agency quote.",
-      503,
-    );
+  aiConfiguration();
   const previous = previousPlanId ? ownedPlan(userId, previousPlanId) : null;
   const messages: object[] = [
     {
@@ -149,7 +164,27 @@ export async function askAI(
   const answerSchema = z
     .object({ answer: z.string().min(1).max(4000) })
     .strict();
-  const schema = mode === "plan" ? draftSchema : answerSchema;
+  // Azure's strict JSON Schema subset excludes length/range constraints.
+  // The full draftSchema and answerSchema are still enforced on the server.
+  const wireSchema =
+    mode === "plan"
+      ? z
+          .object({
+            title: z.string(),
+            summary: z.string(),
+            days: z.array(
+              z
+                .object({
+                  day: z.number(),
+                  destinationId: z.string(),
+                  activityIds: z.array(z.string()),
+                  travelOnly: z.boolean(),
+                })
+                .strict(),
+            ),
+          })
+          .strict()
+      : z.object({ answer: z.string() }).strict();
   const result = providerResult.parse(
     await complete({
       messages,
@@ -158,7 +193,7 @@ export async function askAI(
         json_schema: {
           name: mode === "plan" ? "kenya_itinerary" : "kenya_answer",
           strict: true,
-          schema: z.toJSONSchema(schema),
+          schema: z.toJSONSchema(wireSchema),
         },
       },
     }),
@@ -179,7 +214,9 @@ export async function askAI(
   }
   if (mode === "plan") {
     if (!preferences) throw new AppError("Travel preferences are required.");
-    return { plan: savePlan(userId, preferences, parsed, "ai") };
+    return {
+      plan: savePlan(userId, preferences, draftSchema.parse(parsed), "ai"),
+    };
   }
   const answer = answerSchema.parse(parsed).answer;
   return { answer };

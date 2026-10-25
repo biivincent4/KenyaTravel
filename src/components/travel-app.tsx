@@ -57,6 +57,7 @@ type View =
 type Session = {
   user: User | null;
   aiReady: boolean;
+  aiProviderLabel: string;
   paymentReady: boolean;
   googleReady: boolean;
   googleLinked: boolean;
@@ -100,6 +101,7 @@ export default function TravelApp({
   const [session, setSession] = useState<Session>({
     user: null,
     aiReady: false,
+    aiProviderLabel: "AI provider",
     paymentReady: false,
     googleReady: false,
     googleLinked: false,
@@ -1007,8 +1009,8 @@ export default function TravelApp({
                     <div className="setup-note">
                       <CircleHelp size={17} />
                       <span>
-                        AI needs server configuration. Until then, choose a
-                        curated route or{" "}
+                        {session.aiProviderLabel} needs server configuration.
+                        Until then, choose a curated route or{" "}
                         <button
                           className="inline-link"
                           onClick={() => go("contact")}
@@ -1050,8 +1052,9 @@ export default function TravelApp({
                   <div className="field-note chat-note">
                     Use the question button for enquiries; &ldquo;Create my
                     itinerary&rdquo; builds or refines a saved trip. Prompts and
-                    travel preferences are sent to OpenAI when connected.
-                    Don&apos;t share private documents or payment details.
+                    travel preferences are sent to {session.aiProviderLabel}{" "}
+                    when connected. Don&apos;t share private documents or
+                    payment details.
                   </div>
                 </div>
                 {activePlan ? (
