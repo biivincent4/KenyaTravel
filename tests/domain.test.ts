@@ -31,6 +31,7 @@ import { destinations, transferHours } from "../src/lib/catalog";
 
 const directory = mkdtempSync(join(tmpdir(), "sanaa-domain-"));
 process.env.DATABASE_PATH = join(directory, "test.sqlite");
+process.env.AI_PROVIDER = "openai";
 const startDate = dateForDay(new Date().toISOString().slice(0, 10), 90);
 const prefs: Preferences = {
   startDate,

@@ -30,6 +30,7 @@ import {
   quoteSchema,
 } from "@/lib/validation";
 import { askAI, aiReady } from "@/lib/ai";
+import { aiStatus } from "@/lib/ai-config";
 import {
   createCheckout,
   paymentReady,
@@ -158,6 +159,7 @@ async function handle(
       return json({
         user,
         aiReady: aiReady(),
+        aiProviderLabel: aiStatus().label,
         paymentReady: paymentReady(),
         googleReady: googleReady(),
         googleLinked: user ? hasGoogleAccount(user.id) : false,

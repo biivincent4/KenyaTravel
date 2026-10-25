@@ -75,11 +75,50 @@ Without your real OAuth client credentials, provider consent/code exchange canno
 
 ## Connect real AI
 
-Set `OPENAI_API_KEY` and `OPENAI_MODEL` in `.env.local`, then restart. The configured model must support Chat Completions tool calls and strict structured JSON outputs (for example, `gpt-4.1-mini`, subject to your account's access).
+Choose **one** server-side provider with `AI_PROVIDER=openai` or `AI_PROVIDER=azure` in `.env.local`, then restart. Omitting `AI_PROVIDER` preserves the original direct OpenAI behavior. Invalid/incomplete selected-provider configuration visibly disables AI; neither missing credentials nor provider/quota errors cause a silent switch to another provider.
 
-The assistant performs a server-side `lookup_catalog` tool call against this agency's curated data, then returns a structured response. **It does not browse the web or query live supplier availability.** Planning preferences, the prompt and (when refining) the current itinerary are sent to OpenAI; account details, passwords, quotes and payment information are not. Do not type private documents or card data into chat. Review the provider's data policies before enabling it for real travellers.
+### Direct OpenAI
 
-The server validates dates, duration, sequential days, known destination/activity IDs, duplicate activities and road-transfer feasibility. Transfers over six hours require an activity-free travel day; over ten hours are rejected; five-to-six-hour days allow at most one activity. This is conservative illustrative routing, not live traffic or guaranteed logistics. Costs are **recomputed by the server**, not trusted from the model. The sample USD-to-KES rate is **130**, explicitly not live FX. Over-budget estimates are flagged, not disguised as within budget.
+Set `AI_PROVIDER=openai`, `OPENAI_API_KEY` and `OPENAI_MODEL`. The configured model must support Chat Completions tool calls and strict structured JSON outputs (for example, `gpt-4.1-mini`, subject to your account's access). Existing direct OpenAI credentials remain supported and are not changed by selecting Azure.
+
+### Azure OpenAI / Microsoft Foundry
+
+Use a resource-level Azure OpenAI model deployment. A hosted agent, Foundry project, search index or separate agent runtime is **not** required for this app's catalog tool.
+
+```dotenv
+AI_PROVIDER=azure
+AZURE_OPENAI_ENDPOINT=https://<your-resource>.openai.azure.com
+AZURE_OPENAI_API_KEY=<your-resource-key>
+AZURE_OPENAI_DEPLOYMENT=kenyatravel-gpt41mini
+```
+
+`AZURE_OPENAI_ENDPOINT` is the HTTPS **resource origin only**, not a full deployment URL. This MVP accepts Azure public resource hostnames under `openai.azure.com`, `cognitiveservices.azure.com` or `services.ai.azure.com`; custom gateways and private-IP endpoints are deliberately not accepted. The API request uses **`/openai/v1/chat/completions`**, the server-only `api-key` header, and the configured **deployment name** as `model`. The supported v1 API requires no dated `api-version` query. See Microsoft's [endpoint switching guide](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/switching-endpoints) and [structured output guide](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/structured-outputs).
+
+The local KenyaTravel preview is connected to the following dedicated deployment, with the resource and model provisioning state verified as **Succeeded**:
+
+| Setting                      | Value                                              |
+| ---------------------------- | -------------------------------------------------- |
+| Resource group               | `rg-kenyatravel-ai`                                |
+| AI resource                  | `kenyatravel-ai-eb13777c`                          |
+| Resource kind / SKU / region | `AIServices` / `S0` / `eastus`                     |
+| Azure OpenAI endpoint        | `https://kenyatravel-ai-eb13777c.openai.azure.com` |
+| Deployment name              | `kenyatravel-gpt41mini`                            |
+| Model / version              | `gpt-4.1-mini` / `2025-04-14`                      |
+| Deployment SKU / capacity    | `GlobalStandard` / `10`                            |
+| Published rate limits        | 10 requests/minute; 10,000 tokens/minute           |
+| Content filter               | `Microsoft.DefaultV2`                              |
+
+Genuine catalog-grounded enquiry and six-day itinerary generation have been verified using synthetic preferences and an isolated temporary database. Generated plans still require server validation and agency confirmation; this is not live supplier availability or a guarantee that every generated response will be valid.
+
+Billing is usage based, with no provisioned throughput, spillover or dynamic-quota expansion enabled. Capacity is a throttle allocation, **not a spending cap**. Monitor model usage and set appropriate subscription budgets/alerts before wider use. GlobalStandard may process requests **outside the resource's East US region**; this is not an East-US-only data-residency guarantee. A planning/enquiry turn makes two model requests (catalog lookup followed by structured output), so this small pilot capacity can throttle concurrent users. Quota failures are surfaced rather than silently retried or routed elsewhere.
+
+Resource creation requires a session that actually satisfies Azure tenant MFA and suitable subscription permissions. A successful CLI login or enabling a personal Microsoft account's two-step setting alone is not proof that resource-write MFA is satisfied. If Azure reports `RequestDisallowedByAzure`, use [Microsoft's MFA troubleshooting guidance](https://learn.microsoft.com/en-us/cli/azure/use-azure-cli-successfully-troubleshooting#troubleshooting-multifactor-authentication-mfa); never disable tenant policy to bypass the requirement.
+
+Use `.env.local` for this local preview only and never commit resource keys or display them in logs/chat. Keep existing Google/payment settings and SQLite data unchanged when editing AI configuration. Restart the app after changing configuration. For production, use a managed identity/Entra access design or managed secret storage with key rotation; this MVP's API-key environment setup is for local activation and is not a production secret-management solution.
+
+The assistant performs a server-side `lookup_catalog` tool call against this agency's curated data, then returns a structured response. **It does not browse the web or query live supplier availability.** Planning preferences, the prompt and (when refining) the current itinerary are sent to the **explicitly selected OpenAI or Azure OpenAI provider**; account details, passwords, quotes and payment information are not. The planner displays that selected provider. Do not type private documents or card data into chat. Review the provider's data policies before enabling it for real travellers.
+
+The server validates dates, duration, sequential days, known destination/activity IDs, duplicate activities and road-transfer feasibility. Transfers over six hours require an activity-free travel day; over ten hours are rejected; five-to-six-hour days allow at most one activity. This is conservative illustrative routing, not live traffic or guaranteed logistics. Costs are **recomputed by the server**, not trusted from the model. The sample USD-to-KES rate is **130**, explicitly not live FX. Over-budget estimates are flagged, not disguised as within budget. The wire schema uses Azure/OpenAI's supported strict JSON subset; full string length, numeric bounds, array limits and business validation remain enforced server-side. Each model request is bounded to 3,500 output tokens, a 60-second timeout, no redirects and no automatic retries/provider fallbacks.
 
 Without AI credentials, the UI visibly says it is not connected. Curated planning, saved trips, manual enquiries and agency quotes remain usable. AI-generated plans are persisted privately and can be refined into a new saved version. AI enquiries are transient conversation state; send an agency enquiry to preserve an actionable conversation.
 
