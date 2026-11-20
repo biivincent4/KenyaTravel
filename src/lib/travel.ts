@@ -46,6 +46,18 @@ export function saveCatalogPlan(
   packageId: string,
   input: unknown,
 ) {
+  const { preferences, draft } = catalogDraft(packageId, input);
+  return savePlan(userId, preferences, draft, "catalog");
+}
+export function previewCatalogPlan(packageId: string, input: unknown) {
+  const { item, preferences, draft } = catalogDraft(packageId, input);
+  return {
+    journey: item,
+    preferences,
+    itinerary: validateItinerary(draft, preferences),
+  };
+}
+function catalogDraft(packageId: string, input: unknown) {
   const preferences = preferenceSchema.parse(input);
   const item = packages().find((p) => p.id === packageId);
   if (!item) throw new AppError("That trip is not currently offered.", 404);
@@ -80,7 +92,7 @@ export function saveCatalogPlan(
       };
     }),
   };
-  return savePlan(userId, preferences, draft, "catalog");
+  return { item, preferences, draft };
 }
 export function ownedPlan(userId: string, id: string) {
   const row = db()

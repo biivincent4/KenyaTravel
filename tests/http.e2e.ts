@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -100,6 +100,18 @@ async function main() {
       return body;
     };
     return Object.assign(request, {
+      raw: async (path: string, init: RequestInit = {}) => {
+        const response = await fetch(`${origin}${path}`, {
+          ...init,
+          redirect: "manual",
+          headers: {
+            ...(init.headers as Record<string, string>),
+            ...(jar.size ? { Cookie: cookieHeader() } : {}),
+          },
+        });
+        applyCookies(response);
+        return response;
+      },
       callback: async (query: string, expectedCode: string) => {
         const response = await fetch(
           `${origin}/api/auth/google/callback?${query}`,
@@ -420,8 +432,168 @@ async function main() {
       "expired",
     );
     await alice("trips", undefined, 401);
+
+    // ChatGPT / Claude connector: discovery, OAuth 2.1 + PKCE in the browser, then MCP tools.
+    const connector = client();
+    const resource = `${origin}/mcp`;
+    const prm = await (
+      await connector.raw("/.well-known/oauth-protected-resource/mcp")
+    ).json();
+    assert.equal(prm.resource, resource);
+    const metadata = await (
+      await connector.raw("/.well-known/oauth-authorization-server")
+    ).json();
+    assert.deepEqual(prm.authorization_servers, [metadata.issuer]);
+    const mcpCall = (token: string | null, method: string, params = {}) =>
+      connector.raw("/mcp", {
+        method: "POST",
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+      });
+    const anonymous = await mcpCall(null, "tools/list");
+    assert.equal(anonymous.status, 401);
+    assert.match(
+      anonymous.headers.get("www-authenticate")!,
+      /oauth-protected-resource\/mcp/,
+    );
+    const redirectUri = "http://localhost:6274/oauth/callback";
+    const registration = await connector.raw("/oauth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        redirect_uris: [redirectUri],
+        client_name: "MCP Inspector",
+      }),
+    });
+    assert.equal(registration.status, 201);
+    const { client_id } = await registration.json();
+    const verifier = randomBytes(32).toString("base64url");
+    const authorizeQuery = new URLSearchParams({
+      response_type: "code",
+      client_id,
+      redirect_uri: redirectUri,
+      code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+      code_challenge_method: "S256",
+      state: "e2e-state",
+      scope: "trips:read trips:write",
+      resource,
+    });
+    const signInPage = await connector.raw(
+      `/oauth/authorize?${authorizeQuery}`,
+    );
+    assert.equal(signInPage.status, 200);
+    assert.match(
+      signInPage.headers.get("content-security-policy")!,
+      /frame-ancestors 'none'/,
+    );
+    assert.match(await signInPage.text(), /Sign in to connect/);
+    const form = (fields: Record<string, string>, from = origin) =>
+      connector.raw("/oauth/authorize", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Origin: from,
+        },
+        body: new URLSearchParams(fields).toString(),
+      });
+    const login = {
+      action: "login",
+      query: authorizeQuery.toString(),
+      email: "alice@example.test",
+      password,
+    };
+    assert.equal((await form(login, "https://untrusted.example")).status, 403);
+    const signedIn = await form(login);
+    assert.equal(signedIn.status, 303);
+    const consentPage = await connector.raw(
+      new URL(signedIn.headers.get("location")!).pathname +
+        new URL(signedIn.headers.get("location")!).search,
+    );
+    const consentHtml = await consentPage.text();
+    assert.match(consentHtml, /Allow MCP Inspector\?/);
+    const requestId = consentHtml.match(
+      /name="request_id" value="([^"]+)"/,
+    )![1];
+    const approved = await form({
+      action: "consent",
+      request_id: requestId,
+      decision: "allow",
+    });
+    assert.equal(approved.status, 303);
+    const callback = new URL(approved.headers.get("location")!);
+    assert.equal(`${callback.origin}${callback.pathname}`, redirectUri);
+    assert.equal(callback.searchParams.get("state"), "e2e-state");
+    assert.equal(callback.searchParams.get("iss"), origin);
+    assert.equal(
+      (
+        await form({
+          action: "consent",
+          request_id: requestId,
+          decision: "allow",
+        })
+      ).status,
+      400,
+      "consent requests are single use",
+    );
+    const tokenResponse = await connector.raw("/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: callback.searchParams.get("code")!,
+        redirect_uri: redirectUri,
+        client_id,
+        code_verifier: verifier,
+        resource,
+      }).toString(),
+    });
+    assert.equal(tokenResponse.status, 200);
+    const tokens = await tokenResponse.json();
+    const listed = await (
+      await mcpCall(tokens.access_token, "tools/list")
+    ).json();
+    assert.ok(
+      listed.result.tools.some(
+        (tool: { name: string }) => tool.name === "plan_journey",
+      ),
+    );
+    const journey = {
+      packageId: "elephant-trails",
+      startDate: dateForDay(new Date().toISOString().slice(0, 10), 45),
+      partySize: 2,
+      budget: 2000,
+      currency: "USD",
+      interests: ["Wildlife"],
+    };
+    const planned = await (
+      await mcpCall(tokens.access_token, "tools/call", {
+        name: "plan_journey",
+        arguments: journey,
+      })
+    ).json();
+    assert.equal(
+      planned.result.structuredContent.itinerary.estimate.amount,
+      (130 + 240 * 3) * 2,
+    );
+    const saved = await (
+      await mcpCall(tokens.access_token, "tools/call", {
+        name: "save_journey",
+        arguments: journey,
+      })
+    ).json();
+    const savedPlanId = saved.result.structuredContent.planId;
+    assert.ok(
+      (await connector("trips")).plans.some(
+        (plan: { id: string }) => plan.id === savedPlanId,
+      ),
+      "a plan saved from chat appears in the web app's My trips",
+    );
     console.log(
-      "HTTP end-to-end passed: origin guard, customer/admin authentication, Google OAuth safeguards, explicit owner-only draft save, concurrent save idempotency, chat save without AI credentials, draft booking rejection, saved-plan booking, expired session rejection and same-account recovery, enquiry/reply, agency quote, missing-provider safeguards and catalog management.",
+      "HTTP end-to-end passed: origin guard, customer/admin authentication, Google OAuth safeguards, explicit owner-only draft save, concurrent save idempotency, chat save without AI credentials, draft booking rejection, saved-plan booking, expired session rejection and same-account recovery, enquiry/reply, agency quote, missing-provider safeguards, catalog management, and MCP connector OAuth (discovery, DCR, sign-in, consent, PKCE token) with chat planning and saving.",
     );
   } finally {
     child.kill();

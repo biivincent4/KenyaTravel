@@ -38,6 +38,25 @@ export function db() {
     CREATE TABLE IF NOT EXISTS enquiries (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), message TEXT NOT NULL, reply TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS webhook_events (id TEXT PRIMARY KEY, processed_at TEXT DEFAULT CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY, count INTEGER NOT NULL, reset_at INTEGER NOT NULL);
+    CREATE TABLE IF NOT EXISTS oauth_clients (
+      client_id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('dcr','cimd')), client_name TEXT NOT NULL,
+      redirect_uris TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS oauth_requests (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), session_hash TEXT NOT NULL,
+      request TEXT NOT NULL, expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS oauth_codes (
+      code_hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id),
+      redirect_uri TEXT NOT NULL, code_challenge TEXT NOT NULL, resource TEXT NOT NULL, scope TEXT NOT NULL,
+      expires_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+      token_hash TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('access','refresh')), family TEXT NOT NULL,
+      client_id TEXT NOT NULL, user_id TEXT NOT NULL REFERENCES users(id), resource TEXT NOT NULL, scope TEXT NOT NULL,
+      expires_at INTEGER NOT NULL, used_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS oauth_tokens_family ON oauth_tokens(family);
   `);
   const insert = connection.prepare(
     "INSERT OR IGNORE INTO packages(id,content) VALUES (?,?)",

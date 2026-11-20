@@ -28,6 +28,15 @@ export function verifyPassword(password: string, hash: string) {
 }
 const digest = (token: string) =>
   createHash("sha256").update(token).digest("hex");
+const dummyHash = hashPassword("not-a-real-account-password");
+// Always runs scrypt so unknown emails take as long as wrong passwords.
+export function verifyCredentials(email: string, password: string) {
+  const row = db()
+    .prepare("SELECT id,password_hash FROM users WHERE email=?")
+    .get(email) as { id: string; password_hash: string } | undefined;
+  const valid = verifyPassword(password, row?.password_hash || dummyHash);
+  return row && valid ? row.id : null;
+}
 export async function sessionHash() {
   const token = (await cookies()).get(cookieName)?.value;
   return token ? digest(token) : null;

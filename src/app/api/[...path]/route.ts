@@ -6,23 +6,16 @@ import {
   createSession,
   createUser,
   currentUser,
-  hashPassword,
   logout,
   requireUser,
+  verifyCredentials,
   verifyPassword,
   googleCookieName,
   googleCookiePath,
   secureCookies,
   sessionHash,
 } from "@/lib/auth";
-import {
-  db,
-  packages,
-  parsePlan,
-  rateLimit,
-  type User,
-  type PlanRow,
-} from "@/lib/db";
+import { db, packages, parsePlan, rateLimit, type PlanRow } from "@/lib/db";
 import {
   AppError,
   credentialSchema,
@@ -60,7 +53,6 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-const dummyHash = hashPassword("not-a-real-account-password");
 const json = (data: unknown, status = 200) =>
   NextResponse.json(data, { status, headers: { "Cache-Control": "no-store" } });
 async function body(request: NextRequest) {
@@ -271,17 +263,9 @@ async function handle(
         const id = createUser(credentials.email, name, credentials.password);
         await createSession(id);
       } else {
-        const row = db()
-          .prepare("SELECT id,password_hash FROM users WHERE email=?")
-          .get(credentials.email) as
-          (User & { password_hash: string }) | undefined;
-        const valid = verifyPassword(
-          credentials.password,
-          row?.password_hash || dummyHash,
-        );
-        if (!row || !valid)
-          throw new AppError("Email or password is incorrect.", 401);
-        await createSession(row.id);
+        const id = verifyCredentials(credentials.email, credentials.password);
+        if (!id) throw new AppError("Email or password is incorrect.", 401);
+        await createSession(id);
       }
       return json({ user: await currentUser() });
     }

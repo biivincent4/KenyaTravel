@@ -1,6 +1,6 @@
 # Sanaa Kenya — travel agency MVP
 
-A responsive, single-agency Kenya travel platform: Google or password sign-in, curated destinations, private saved itineraries, catalog-grounded AI enquiries/planning, quote requests, an authenticated agency workspace and Stripe **test-mode** hosted checkout. “Sanaa Kenya” is a provisional brand. Content, photographs and rates are illustrative; this is not a production travel service.
+A responsive, single-agency Kenya travel platform: Google or password sign-in, curated destinations, private saved itineraries, catalog-grounded AI enquiries/planning, quote requests, an authenticated agency workspace, Stripe **test-mode** hosted checkout, and a **ChatGPT app / Claude connector** (remote MCP server with OAuth 2.1 account linking and an in-chat itinerary card). “Sanaa Kenya” is a provisional brand. Content, photographs and rates are illustrative; this is not a production travel service.
 
 ## Run locally (Windows PowerShell)
 
@@ -166,6 +166,39 @@ Amounts/currencies and quote versions are owned by the server. Quotes are immuta
 
 There is no refund/cancellation automation, deposit/split-payment, tax engine, automatic supplier reservation, email notification or accounting reconciliation. **M-Pesa is not integrated**; provider availability and Kenyan merchant onboarding/settlement must be evaluated separately before production. Stripe test configuration is not a recommendation that this business is eligible for any specific merchant country or payment method.
 
+## ChatGPT app and Claude connector (MCP)
+
+The same agency backend is exposed as a remote **Model Context Protocol** server at **`{APP_URL}/mcp`** (Streamable HTTP, stateless JSON responses). Travellers connect their Sanaa Kenya account through OAuth 2.1, then plan, save and request quotes from inside ChatGPT or Claude. Plans saved in chat appear in the web app's **My trips** and in the agency workspace once a quote is requested.
+
+<img src="docs/mcp-itinerary-card.png" alt="Itinerary card rendered inside an MCP Apps host after saving: route, six days, a $2,600 estimate marked within budget and a Request agency quote button" width="360">
+
+| Tool              | Scope         | What it does                                                                                       |
+| ----------------- | ------------- | -------------------------------------------------------------------------------------------------- |
+| `get_profile`     | `trips:read`  | Connected profile with a stable opaque `id` (marked `openai/profile` for multi-account support).   |
+| `search_journeys` | `trips:read`  | Curated journeys and destination daily rates, optionally filtered by interest and length.          |
+| `plan_journey`    | `trips:read`  | Server-validated day-by-day itinerary and estimate, rendered as the itinerary card. Saves nothing. |
+| `save_journey`    | `trips:write` | Saves the journey to My trips. Never books or charges.                                             |
+| `list_my_trips`   | `trips:read`  | Saved trips with quote status.                                                                     |
+| `request_quote`   | `trips:write` | Sends a saved trip to the agency; idempotent per trip.                                             |
+
+**Itinerary card.** `plan_journey` declares `_meta.ui.resourceUri` pointing to a `text/html;profile=mcp-app` resource built from `src/mcp-widget` with the official `@modelcontextprotocol/ext-apps` bridge, so the same UI runs in ChatGPT and other MCP Apps hosts. The card calls `save_journey` and `request_quote` itself through `tools/call` and tells the model what happened with `ui/update-model-context`. Prices always come from the server, never from the model or the card. After editing the card, run `npm run build:widget` (also run automatically by `npm run build`); a test fails if the committed bundle in `src/generated` is stale.
+
+**Authorization (MCP authorization spec 2025-11-25).** The app is its own authorization server; nothing external is required.
+
+- Discovery: unauthenticated MCP requests get `401` with `WWW-Authenticate: Bearer resource_metadata=".../.well-known/oauth-protected-resource/mcp"`. The protected resource metadata (RFC 9728) names this origin as the issuer, and `/.well-known/oauth-authorization-server` (RFC 8414) advertises S256 PKCE, `none` token-endpoint authentication, `iss` in authorization responses (RFC 9207) and both client registration methods.
+- Clients: dynamic client registration (RFC 7591) at `/oauth/register`, or Client ID Metadata Documents fetched over HTTPS (no redirects, 5 s timeout, 16 KB cap) only from `OAUTH_CIMD_HOSTS` (default `chatgpt.com,claude.ai`). Redirect URIs must be HTTPS, or HTTP on loopback, and must match exactly.
+- `/oauth/authorize` signs the traveller in with their existing password (Google-only accounts sign in on the site first) and shows a consent screen bound to that browser session. Form posts are same-origin-checked, the pages cannot be framed, and each consent is single use. Unregistered redirect URIs get an error page, never a redirect.
+- `/oauth/token` requires the PKCE verifier and the original redirect URI. Codes expire in five minutes and are consumed even when the exchange fails. Access tokens last one hour and are bound to the `{APP_URL}/mcp` resource. Refresh tokens rotate, and replaying a used refresh token revokes the whole grant. Only SHA-256 hashes of codes and tokens are stored.
+- Each tool checks its scope; a missing scope returns a tool error carrying `mcp/www_authenticate` so the client can ask for more access. All data access is scoped to the token's user.
+
+**Connect it.** ChatGPT and Claude need a public HTTPS URL. For a local preview, run a tunnel to port 3000 (for example `cloudflared tunnel --url http://localhost:3000` or `devtunnel host -p 3000 --allow-anonymous`). Set `APP_URL` to the tunnel's HTTPS origin, then restart with `npm run build` and `npm start`.
+
+- **ChatGPT:** enable developer mode (Settings → Apps → Advanced settings), create an app with MCP server URL `https://<your-origin>/mcp` and OAuth authentication, then ask, for example, "Plan the wild heart of Kenya for two from 10 March, budget $4,000".
+- **Claude:** Settings → Connectors → Add custom connector, with the same URL.
+- **MCP Inspector:** `npx @modelcontextprotocol/inspector`, Streamable HTTP, URL `http://localhost:3000/mcp`; it registers itself and runs the same OAuth flow.
+
+This is a preview connector for a local MVP. It is not a published ChatGPT app or Claude directory listing. Public submission additionally needs hosted HTTPS, privacy terms, review assets and the production prerequisites below.
+
 ## Checks
 
 ```powershell
@@ -177,7 +210,7 @@ npm run test:e2e
 npm start
 ```
 
-Domain tests cover itinerary/date/route/estimate validation, plan ownership, quote locks, missing-provider safeguards, signed webhook integrity/idempotency/version binding, amount mismatch rejection and catalog-grounded AI tool use with a mock provider. Google tests verify locally signed RSA tokens (including tampered signature, incorrect issuer/audience/nonce/authorized party, expired/stale tokens and unverified email), PKCE/state expiry/replay, explicit linking, preserved account data and protected agency roles. The HTTP end-to-end check starts a separate production server on port **3017** with a temporary database and non-working Google client fixtures, exercises customer/admin authorization, Google start/cancel/replay/session-binding/logout safeguards, saved plans, requests, quotes, enquiries, catalog edits and unavailable AI/payment integrations, then removes only its own temporary test data. Do not run another server on port 3017 during that check. Tests do not contact Google or make external charges or external AI calls. Genuine Google consent/code exchange, provider checkout and AI responses still require your credentials and separate provider validation.
+Domain tests cover itinerary/date/route/estimate validation, plan ownership, quote locks, missing-provider safeguards, signed webhook integrity/idempotency/version binding, amount mismatch rejection and catalog-grounded AI tool use with a mock provider. Google tests verify locally signed RSA tokens (including tampered signature, incorrect issuer/audience/nonce/authorized party, expired/stale tokens and unverified email), PKCE/state expiry/replay, explicit linking, preserved account data and protected agency roles. The HTTP end-to-end check starts a separate production server on port **3017** with a temporary database and non-working Google client fixtures, exercises customer/admin authorization, Google start/cancel/replay/session-binding/logout safeguards, saved plans, requests, quotes, enquiries, catalog edits and unavailable AI/payment integrations, then removes only its own temporary test data. It also connects as an MCP client over real HTTP: discovery metadata, the 401 challenge, dynamic registration, browser sign-in with a cross-origin rejection, single-use consent, the PKCE token exchange, and planning and saving through `/mcp`, checking the saved plan appears in the web app. MCP/OAuth unit tests cover redirect-URI rules, error redirects with `state` and `iss`, metadata-document host allowlisting and caching, PKCE and single-use codes, refresh rotation with replay revocation, per-tool scopes, cross-user isolation and the widget bundle. Do not run another server on port 3017 during that check. Tests do not contact Google or make external charges or external AI calls. Genuine Google consent/code exchange, provider checkout and AI responses still require your credentials and separate provider validation.
 
 ## Implementation & boundaries
 
